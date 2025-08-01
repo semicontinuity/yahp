@@ -169,11 +169,29 @@ def create_request_handler(config: Config) -> type:
                 rule_id = self.config.get_rule_id(matched_rule)
                 self.rule_matched = matched_rule
                 
-                # Log request with original headers before forwarding
-                self.log_http_request(request_time, rule_id, headers, modified_headers, body)
+                # Prepare headers for forwarding - do this before logging
+                forwarded_headers = modified_headers.copy()
+                
+                # Remove special headers and old Host header
+                for special_header in [':path', ':method', 'Host']:
+                    if special_header in forwarded_headers:
+                        if VERY_VERBOSE:
+                            logger.debug(f"Removing header: {special_header}")
+                        del forwarded_headers[special_header]
+                
+                # Set new Host header to the value from the config file
+                if target_host:
+                    forwarded_headers['Host'] = target_host
+                    if VERY_VERBOSE:
+                        logger.debug(f"Set Host header to: {target_host}")
+                else:
+                    logger.warning("No host specified for forwarding request")
+                
+                # Log request with headers as they will be sent to the upstream server
+                self.log_http_request(request_time, rule_id, headers, forwarded_headers, modified_headers[':path'], body)
                 
                 # Forward request
-                response = self.forward_request(method, target_host, target_protocol, modified_headers, body)
+                response = self.forward_request(method, target_host, target_protocol, modified_headers, forwarded_headers, body)
                 
                 # Log response
                 self.log_http_response(request_time, rule_id, response)
@@ -304,14 +322,17 @@ def create_request_handler(config: Config) -> type:
             
             return False
         
-        def forward_request(self, method: str, host: str | None, protocol: str | None, headers: dict[str, str], body: bytes) -> requests.Response | FakeResponse:
+        def forward_request(self, method: str, host: str | None, protocol: str | None, 
+                           headers: dict[str, str], forwarded_headers: dict[str, str], 
+                           body: bytes) -> requests.Response | FakeResponse:
             """Forward request to target host.
             
             Args:
                 method: HTTP method.
                 host: Target host.
                 protocol: Protocol to use (http or https).
-                headers: Request headers.
+                headers: Original request headers.
+                forwarded_headers: Headers to send to the upstream server.
                 body: Request body.
                 
             Returns:
@@ -328,28 +349,6 @@ def create_request_handler(config: Config) -> type:
             if not protocol:
                 # Default to https for non-localhost hosts
                 protocol = 'https' if 'localhost' not in host and '127.0.0.1' not in host else 'http'
-            
-            # Remove special headers
-            # Prepare headers for forwarding
-            forwarded_headers = headers.copy()
-            
-            # Remove special headers and old Host header
-            for special_header in [':path', ':method', 'Host']:
-                if special_header in forwarded_headers:
-                    if VERY_VERBOSE:
-                        logger.debug(f"Removing header: {special_header}")
-                    del forwarded_headers[special_header]
-            
-            # Set new Host header to target host
-            # Ensure Host header contains the name of the upstream server, not localhost
-            if host:
-                # Extract just the hostname part without port if it's included
-                hostname = re.sub(r':\d+$', '', host)
-                forwarded_headers['Host'] = hostname
-                if VERY_VERBOSE:
-                    logger.debug(f"Set Host header to: {hostname}")
-            else:
-                logger.warning("No host specified for forwarding request")
             
             url = f"{protocol}://{host}{headers[':path']}"
             if VERY_VERBOSE:
@@ -402,26 +401,27 @@ def create_request_handler(config: Config) -> type:
                 )
         
         def log_http_request(self, timestamp: str, rule_id: str, original_headers: dict[str, str], 
-                            modified_headers: dict[str, str], body: bytes) -> None:
+                            forwarded_headers: dict[str, str], path: str, body: bytes) -> None:
             """Log HTTP request to files.
             
             Args:
                 timestamp: Request timestamp.
                 rule_id: Rule ID.
                 original_headers: Original request headers.
-                modified_headers: Modified headers sent to upstream server.
+                forwarded_headers: Headers sent to upstream server.
+                path: The path sent to upstream server.
                 body: Request body.
             """
             # Format timestamp for filename
             ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
             
-            # Log headers - use modified headers to show the URI as sent to upstream server
+            # Log headers - use forwarded headers to show what was sent to upstream server
             header_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.h.txt")
             with open(header_file, 'w') as f:
-                f.write(f"{original_headers[':method']} {modified_headers[':path']} HTTP/1.1\n")
-                for key, value in original_headers.items():
-                    if not key.startswith(':'):
-                        f.write(f"{key}: {value}\n")
+                f.write(f"{original_headers[':method']} {path} HTTP/1.1\n")
+                # Log the forwarded headers, including the Host header
+                for key, value in forwarded_headers.items():
+                    f.write(f"{key}: {value}\n")
             
             # Log body only if it's not empty
             if body and len(body) > 0:
