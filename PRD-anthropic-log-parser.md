@@ -18,7 +18,7 @@ Parser shall be implemented as a Python application `log-parser-anthropic.py` wi
 - Be able to read and parse logs produced by YAHP
 - Collect back various parts of HTTP request+response (HTTP request header, body, HTTP response header, body), that were written by YAHP as separate files.
 - By default, read all log files from YAHP `logs-path`
-- Process only requests to `/raw/anthropic/v1/messages`, ignore other URLs
+- Process only requests to `/raw/anthropic/v1/messages`, ignore other URLs including `/raw/anthropic/v1/messages/count_tokens`
 
 ### Logging Requirements
 
@@ -72,6 +72,10 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":
 event: message_stop
 data: {"type":"message_stop"       }
 ```
+
+Here is the example of restructured HTTP request at the output:
+
+```{"request":{"system":[{"text":"You are ...""}], "messages":[{"role":"user"}] }}```
 
 Here is the example of restructured HTTP response at the output:
 
