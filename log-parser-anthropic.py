@@ -25,8 +25,60 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
+
+
+@dataclass
+class TextBlock:
+    """A block of text with a type (text or thoughts)."""
+    type: str
+    text: str
+
+
+@dataclass
+class ContentBlock:
+    """A content block from the Anthropic API response."""
+    type: str
+    data: List[TextBlock] = field(default_factory=list)
+
+
+@dataclass
+class Message:
+    """Message information from the Anthropic API response."""
+    id: str = ""
+
+
+@dataclass
+class AnthropicResponse:
+    """Parsed response from the Anthropic API."""
+    message: Message = field(default_factory=Message)
+    content: List[ContentBlock] = field(default_factory=list)
+
+
+@dataclass
+class AnthropicRequest:
+    """Parsed request to the Anthropic API."""
+    system: str = ""
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class LogEntry:
+    """A log entry containing information from a request-response pair."""
+    ts: str
+    request: AnthropicRequest
+    response: AnthropicResponse
+
+
+@dataclass
+class LogFiles:
+    """Paths to log files for a single request-response pair."""
+    req_header: Optional[str] = None
+    req_payload: Optional[str] = None
+    res_header: Optional[str] = None
+    res_payload: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def find_log_files(logs_path: str) -> Dict[str, Dict[str, str]]:
+def find_log_files(logs_path: str) -> Dict[str, LogFiles]:
     """
     Find all log files in the specified directory and group them by timestamp and rule_id.
     
@@ -55,14 +107,13 @@ def find_log_files(logs_path: str) -> Dict[str, Dict[str, str]]:
         logs_path: Path to the directory containing YAHP log files
         
     Returns:
-        A dictionary where keys are "{timestamp}-{rule_id}" and values are dictionaries
-        containing paths to the corresponding log files. The inner dictionary keys are
-        standardized as "req.h.txt", "req.p.json", "res.h.txt", "res.p.txt", etc.
+        A dictionary where keys are "{timestamp}-{rule_id}" and values are LogFiles objects
+        containing paths to the corresponding log files.
         
     Raises:
         SystemExit: If the logs directory does not exist or is not a directory
     """
-    log_files = {}
+    log_files_groups = {}
     logs_dir = Path(logs_path)
     
     if not logs_dir.exists() or not logs_dir.is_dir():
@@ -77,15 +128,23 @@ def find_log_files(logs_path: str) -> Dict[str, Dict[str, str]]:
             timestamp, rule_id, req_res, head_payload, file_type = match.groups()
             key = f"{timestamp}-{rule_id}"
             
-            if key not in log_files:
-                log_files[key] = {}
-
-            log_files[key][f"{req_res}.{head_payload}"] = str(file_path)
+            if key not in log_files_groups:
+                log_files_groups[key] = LogFiles()
+            
+            # Map file to the appropriate field in LogFiles
+            if req_res == 'req' and head_payload == 'h':
+                log_files_groups[key].req_header = str(file_path)
+            elif req_res == 'req' and head_payload == 'p':
+                log_files_groups[key].req_payload = str(file_path)
+            elif req_res == 'res' and head_payload == 'h':
+                log_files_groups[key].res_header = str(file_path)
+            elif req_res == 'res' and head_payload == 'p':
+                log_files_groups[key].res_payload = str(file_path)
     
-    return log_files
+    return log_files_groups
 
 
-def is_anthropic_api_request(log_files: Dict[str, str]) -> bool:
+def is_anthropic_api_request(log_files: LogFiles) -> bool:
     """
     Check if the log files correspond to a request to the Anthropic API messages endpoint.
     
@@ -93,59 +152,51 @@ def is_anthropic_api_request(log_files: Dict[str, str]) -> bool:
     /raw/anthropic/v1/messages/count_tokens, as per the requirements.
     
     Args:
-        log_files: Dictionary containing paths to log files for a single request/response.
+        log_files: LogFiles object containing paths to log files for a single request/response.
         
     Returns:
         True if the request is to /raw/anthropic/v1/messages (excluding count_tokens), False otherwise.
     """
-    if 'req.h' not in log_files:
+    if not log_files.req_header:
         return False
     
-    with open(log_files['req.h'], 'r') as f:
+    with open(log_files.req_header, 'r') as f:
         headers = f.read()
         # Check if the request is to /raw/anthropic/v1/messages but not to /raw/anthropic/v1/messages/count_tokens
         return '/raw/anthropic/v1/messages' in headers and '/raw/anthropic/v1/messages/count_tokens' not in headers
 
 
-def parse_request(log_files: Dict[str, str]) -> Dict[str, Any]:
+def parse_request(log_files: LogFiles) -> AnthropicRequest:
     """
     Parse the HTTP request from log files.
     
     Args:
-        log_files: Dictionary containing paths to log files for a single request/response.
+        log_files: LogFiles object containing paths to log files for a single request/response.
         
     Returns:
-        Dictionary containing parsed request information.
+        AnthropicRequest object containing parsed request information.
     """
-    request = {}
-    # Find the request body file (JSON)
-    req_body_file = None
-    for file_category, file_path in log_files.items():
-        if file_category.startswith('req.p'):
-            req_body_file = file_path
-            break
-    else:
-        print(f"Request header not found", file=sys.stderr)
+    request = AnthropicRequest()
     
     # Parse request body (JSON)
-    if req_body_file:
-        with open(req_body_file, 'r') as f:
+    if log_files.req_payload:
+        with open(log_files.req_payload, 'r') as f:
             try:
                 body = json.load(f)
                 # Extract system and messages fields
                 if 'system' in body:
-                    request['system'] = body['system']
+                    request.system = body['system']
                 if 'messages' in body:
-                    request['messages'] = body['messages']
+                    request.messages = body['messages']
             except json.JSONDecodeError:
-                print(f"Error: Failed to parse request body as JSON: {req_body_file}", file=sys.stderr)
+                print(f"Error: Failed to parse request body as JSON: {log_files.req_payload}", file=sys.stderr)
     else:
         print(f"Warning: No request body file found for request", file=sys.stderr)
     
     return request
 
 
-def parse_event_stream(content: str) -> Dict[str, Any]:
+def parse_event_stream(content: str) -> AnthropicResponse:
     """
     Parse text/event-stream format content from Anthropic API responses.
     
@@ -160,18 +211,15 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
         content: The content in text/event-stream format.
         
     Returns:
-        Dictionary containing:
-        - message: Object with message ID
-        - content: Array of content blocks, each with:
+        AnthropicResponse object containing:
+        - message: Message object with ID
+        - content: List of ContentBlock objects, each with:
           - type: Content type (e.g., 'text')
-          - data: Array of text blocks, each with:
+          - data: List of TextBlock objects, each with:
             - type: 'thoughts' for content in <thinking> tags, 'text' otherwise
             - text: The actual text content
     """
-    response = {
-        'message': {},
-        'content': []
-    }
+    response = AnthropicResponse()
     
     # Split content into events
     events = []
@@ -194,7 +242,6 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
         events.append(current_event)
     
     # Process events
-    message_id = None
     content_blocks = {}
     
     for event in events:
@@ -209,7 +256,7 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
         if event_type == 'message_start':
             if 'message' in data_json and 'id' in data_json['message']:
                 message_id = data_json['message']['id']
-                response['message']['id'] = message_id
+                response.message.id = message_id
         
         elif event_type == 'content_block_start':
             if 'index' in data_json and 'content_block' in data_json:
@@ -239,14 +286,7 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
         text = block.get('text', '')
         
         # Create a content block entry
-        content_block = {
-            'type': content_type,
-            'data': []
-        }
-        
-        # Split text into thoughts and regular text
-        current_text = ''
-        current_type = 'text'
+        content_block = ContentBlock(type=content_type)
         
         # Use regex to find <thinking>...</thinking> blocks
         thinking_pattern = re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL)
@@ -263,18 +303,18 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
                 if match.start() > last_end:
                     before_text = text[last_end:match.start()]
                     if before_text.strip():
-                        content_block['data'].append({
-                            'type': 'text',
-                            'text': before_text.strip()
-                        })
+                        content_block.data.append(TextBlock(
+                            type='text',
+                            text=before_text.strip()
+                        ))
                 
                 # Add thinking block
                 thinking_text = match.group(1).strip()
                 if thinking_text:
-                    content_block['data'].append({
-                        'type': 'thoughts',
-                        'text': thinking_text
-                    })
+                    content_block.data.append(TextBlock(
+                        type='thoughts',
+                        text=thinking_text
+                    ))
                 
                 last_end = match.end()
             
@@ -282,52 +322,49 @@ def parse_event_stream(content: str) -> Dict[str, Any]:
             if last_end < len(text):
                 remaining_text = text[last_end:]
                 if remaining_text.strip():
-                    content_block['data'].append({
-                        'type': 'text',
-                        'text': remaining_text.strip()
-                    })
+                    content_block.data.append(TextBlock(
+                        type='text',
+                        text=remaining_text.strip()
+                    ))
         else:
             # No thinking blocks, just add the text
             if text.strip():
-                content_block['data'].append({
-                    'type': 'text',
-                    'text': text.strip()
-                })
+                content_block.data.append(TextBlock(
+                    type='text',
+                    text=text.strip()
+                ))
         
         # Add content block to response
-        if content_block['data']:
-            response['content'].append(content_block)
+        if content_block.data:
+            response.content.append(content_block)
     
     return response
 
 
-def parse_response(log_files: Dict[str, str]) -> Dict[str, Any]:
+def parse_response(log_files: LogFiles) -> AnthropicResponse:
     """
     Parse the HTTP response from log files.
     
     Args:
-        log_files: Dictionary containing paths to log files for a single request/response.
+        log_files: LogFiles object containing paths to log files for a single request/response.
         
     Returns:
-        Dictionary containing parsed response information.
+        AnthropicResponse object containing parsed response information.
     """
-    # Initialize empty response structure
-    response = {
-        'message': {},
-        'content': []
-    }
+    response = AnthropicResponse()
     
     # Parse response body (text/event-stream)
-    if 'res.p' in log_files:
-        with open(log_files['res.p'], 'r') as f:
+    if log_files.res_payload:
+        with open(log_files.res_payload, 'r') as f:
             response_text = f.read()
-            parsed_response = parse_event_stream(response_text)
-            response.update(parsed_response)
+            response = parse_event_stream(response_text)
+    else:
+        print(f"Warning: No response body file found for response", file=sys.stderr)
     
     return response
 
 
-def process_log_files(log_files_groups: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
+def process_log_files(log_files_groups: Dict[str, LogFiles]) -> List[LogEntry]:
     """
     Process all log file groups and extract information from Anthropic API requests.
     
@@ -336,10 +373,10 @@ def process_log_files(log_files_groups: Dict[str, Dict[str, str]]) -> List[Dict[
     
     Args:
         log_files_groups: Dictionary where keys are "{timestamp}-{rule_id}" and values are
-                         dictionaries containing paths to the corresponding log files.
+                         LogFiles objects containing paths to the corresponding log files.
         
     Returns:
-        List of dictionaries containing:
+        List of LogEntry objects containing:
         - ts: Timestamp from the log file name
         - request: Parsed request information (system and messages)
         - response: Parsed response information (message ID and content blocks)
@@ -358,16 +395,24 @@ def process_log_files(log_files_groups: Dict[str, Dict[str, str]]) -> List[Dict[
         request = parse_request(log_files)
         response = parse_response(log_files)
         
-        # Create result entry
-        result = {
-            'ts': timestamp,
-            'request': request,
-            'response': response
-        }
+        # Create log entry
+        log_entry = LogEntry(
+            ts=timestamp,
+            request=request,
+            response=response
+        )
         
-        results.append(result)
+        results.append(log_entry)
     
     return results
+
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    """JSON encoder that can handle dataclasses."""
+    def default(self, o):
+        if hasattr(o, '__dataclass_fields__'):
+            return asdict(o)
+        return super().default(o)
 
 
 def main():
@@ -399,13 +444,13 @@ def main():
         if args.output == '-':
             # Write to stdout
             for result in results:
-                print(json.dumps(result))
+                print(json.dumps(result, cls=EnhancedJSONEncoder))
         else:
             # Write to file
             try:
                 with open(args.output, 'w') as f:
                     for result in results:
-                        f.write(json.dumps(result) + '\n')
+                        f.write(json.dumps(result, cls=EnhancedJSONEncoder) + '\n')
                 if args.verbose:
                     print(f"Results written to {args.output}", file=sys.stderr)
             except IOError as e:
