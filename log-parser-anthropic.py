@@ -32,7 +32,12 @@ from typing import Dict, List, Any, Optional, Tuple
 
 @dataclass
 class TextBlock:
-    """A block of text with a type (text or thoughts)."""
+    """
+    A block of text with a type.
+    
+    The type can be 'text' for regular text, or the name of any XML-like tag found in the content,
+    such as 'thinking', 'execute_command', 'update_todo_list', 'read_file', etc.
+    """
     type: str
     text: str
 
@@ -58,10 +63,18 @@ class AnthropicResponse:
 
 
 @dataclass
+class RequestBlock:
+    """A block of text in a request with a type."""
+    type: str
+    text: str
+
+
+@dataclass
 class AnthropicRequest:
     """Parsed request to the Anthropic API."""
     system: str = ""
     messages: List[Dict[str, Any]] = field(default_factory=list)
+    blocks: List[RequestBlock] = field(default_factory=list)
 
 
 @dataclass
@@ -166,6 +179,67 @@ def is_anthropic_api_request(log_files: LogFiles) -> bool:
         return '/raw/anthropic/v1/messages' in headers and '/raw/anthropic/v1/messages/count_tokens' not in headers
 
 
+def process_content_blocks(content: str, blocks_list: List[RequestBlock]) -> None:
+    """
+    Process content string to extract XML-like tags and add them to blocks list.
+    
+    Args:
+        content: The content string to process
+        blocks_list: List to add the extracted blocks to
+    """
+    # General pattern to find any XML-like tag
+    tag_pattern = re.compile(r'<([a-zA-Z_][a-zA-Z0-9_]*)>(.*?)</\1>', re.DOTALL)
+    
+    # Find all blocks of any type
+    all_matches = []
+    for match in tag_pattern.finditer(content):
+        block_type = match.group(1)  # The tag name
+        block_content = match.group(2).strip()  # The content between tags
+        all_matches.append((match.start(), match.end(), block_type, block_content))
+    
+    # Sort matches by start position
+    all_matches.sort(key=lambda x: x[0])
+    
+    if all_matches:
+        # Process content with blocks
+        last_end = 0
+        
+        for start, end, block_type, block_text in all_matches:
+            # Add text before block
+            if start > last_end:
+                before_text = content[last_end:start]
+                if before_text.strip():
+                    blocks_list.append(RequestBlock(
+                        type='text',
+                        text=before_text.strip()
+                    ))
+            
+            # Add block
+            if block_text:
+                blocks_list.append(RequestBlock(
+                    type=block_type,
+                    text=block_text
+                ))
+            
+            last_end = end
+        
+        # Add remaining text after last block
+        if last_end < len(content):
+            remaining_text = content[last_end:]
+            if remaining_text.strip():
+                blocks_list.append(RequestBlock(
+                    type='text',
+                    text=remaining_text.strip()
+                ))
+    else:
+        # No blocks, just add the text
+        if content.strip():
+            blocks_list.append(RequestBlock(
+                type='text',
+                text=content.strip()
+            ))
+
+
 def parse_request(log_files: LogFiles) -> AnthropicRequest:
     """
     Parse the HTTP request from log files.
@@ -188,6 +262,18 @@ def parse_request(log_files: LogFiles) -> AnthropicRequest:
                     request.system = body['system']
                 if 'messages' in body:
                     request.messages = body['messages']
+                
+                # Process content blocks to extract any XML-like tags
+                if 'messages' in body and body['messages']:
+                    for message in body['messages']:
+                        if 'content' in message:
+                            if isinstance(message['content'], str):
+                                content = message['content']
+                                process_content_blocks(content, request.blocks)
+                            elif isinstance(message['content'], list):
+                                for content_item in message['content']:
+                                    if isinstance(content_item, dict) and 'text' in content_item:
+                                        process_content_blocks(content_item['text'], request.blocks)
             except json.JSONDecodeError:
                 print(f"Error: Failed to parse request body as JSON: {log_files.req_payload}", file=sys.stderr)
     else:
@@ -204,8 +290,8 @@ def parse_event_stream(content: str) -> AnthropicResponse:
     streaming API. It extracts the message ID from the 'message_start' event and
     builds content blocks from 'content_block_start' and 'content_block_delta' events.
     
-    It also processes the text content to identify and separate <thinking> blocks
-    from regular text.
+    It also processes the text content to identify and extract any XML-like tags
+    (e.g., <thinking>, <execute_command>, <update_todo_list>, etc.) as separate blocks.
     
     Args:
         content: The content in text/event-stream format.
@@ -216,7 +302,7 @@ def parse_event_stream(content: str) -> AnthropicResponse:
         - content: List of ContentBlock objects, each with:
           - type: Content type (e.g., 'text')
           - data: List of TextBlock objects, each with:
-            - type: 'thoughts' for content in <thinking> tags, 'text' otherwise
+            - type: The tag name for content in XML-like tags, 'text' otherwise
             - text: The actual text content
     """
     response = AnthropicResponse()
@@ -288,37 +374,43 @@ def parse_event_stream(content: str) -> AnthropicResponse:
         # Create a content block entry
         content_block = ContentBlock(type=content_type)
         
-        # Use regex to find <thinking>...</thinking> blocks
-        thinking_pattern = re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL)
+        # General pattern to find any XML-like tag
+        tag_pattern = re.compile(r'<([a-zA-Z_][a-zA-Z0-9_]*)>(.*?)</\1>', re.DOTALL)
         
-        # Find all thinking blocks
-        thinking_matches = list(thinking_pattern.finditer(text))
+        # Find all blocks of any type
+        all_matches = []
+        for match in tag_pattern.finditer(text):
+            block_type = match.group(1)  # The tag name
+            block_content = match.group(2).strip()  # The content between tags
+            all_matches.append((match.start(), match.end(), block_type, block_content))
         
-        if thinking_matches:
-            # Process text with thinking blocks
+        # Sort matches by start position
+        all_matches.sort(key=lambda x: x[0])
+        
+        if all_matches:
+            # Process text with blocks
             last_end = 0
             
-            for match in thinking_matches:
-                # Add text before thinking block
-                if match.start() > last_end:
-                    before_text = text[last_end:match.start()]
+            for start, end, block_type, block_text in all_matches:
+                # Add text before block
+                if start > last_end:
+                    before_text = text[last_end:start]
                     if before_text.strip():
                         content_block.data.append(TextBlock(
                             type='text',
                             text=before_text.strip()
                         ))
                 
-                # Add thinking block
-                thinking_text = match.group(1).strip()
-                if thinking_text:
+                # Add block
+                if block_text:
                     content_block.data.append(TextBlock(
-                        type='thoughts',
-                        text=thinking_text
+                        type=block_type,
+                        text=block_text
                     ))
                 
-                last_end = match.end()
+                last_end = end
             
-            # Add remaining text after last thinking block
+            # Add remaining text after last block
             if last_end < len(text):
                 remaining_text = text[last_end:]
                 if remaining_text.strip():
@@ -327,7 +419,7 @@ def parse_event_stream(content: str) -> AnthropicResponse:
                         text=remaining_text.strip()
                     ))
         else:
-            # No thinking blocks, just add the text
+            # No blocks, just add the text
             if text.strip():
                 content_block.data.append(TextBlock(
                     type='text',
