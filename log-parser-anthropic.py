@@ -62,19 +62,14 @@ class AnthropicResponse:
     content: List[ContentBlock] = field(default_factory=list)
 
 
-@dataclass
-class RequestBlock:
-    """A block of text in a request with a type."""
-    type: str
-    text: str
+
 
 
 @dataclass
 class AnthropicRequest:
     """Parsed request to the Anthropic API."""
-    system: str = ""
+    system: TextBlock = field(default_factory=lambda: TextBlock(type="text", text=""))
     messages: List[Dict[str, Any]] = field(default_factory=list)
-    blocks: List[RequestBlock] = field(default_factory=list)
 
 
 @dataclass
@@ -179,13 +174,15 @@ def is_anthropic_api_request(log_files: LogFiles) -> bool:
         return '/raw/anthropic/v1/messages' in headers and '/raw/anthropic/v1/messages/count_tokens' not in headers
 
 
-def process_content_blocks(content: str, blocks_list: List[RequestBlock]) -> None:
+def process_content_blocks(content: str) -> List[TextBlock]:
     """
-    Process content string to extract XML-like tags and add them to blocks list.
+    Process content string to extract XML-like tags and return a list of TextBlock objects.
     
     Args:
         content: The content string to process
-        blocks_list: List to add the extracted blocks to
+        
+    Returns:
+        List of TextBlock objects representing the content
     """
     # General pattern to find any XML-like tag
     tag_pattern = re.compile(r'<([a-zA-Z_][a-zA-Z0-9_]*)>(.*?)</\1>', re.DOTALL)
@@ -200,6 +197,8 @@ def process_content_blocks(content: str, blocks_list: List[RequestBlock]) -> Non
     # Sort matches by start position
     all_matches.sort(key=lambda x: x[0])
     
+    blocks_list = []
+    
     if all_matches:
         # Process content with blocks
         last_end = 0
@@ -209,14 +208,14 @@ def process_content_blocks(content: str, blocks_list: List[RequestBlock]) -> Non
             if start > last_end:
                 before_text = content[last_end:start]
                 if before_text.strip():
-                    blocks_list.append(RequestBlock(
+                    blocks_list.append(TextBlock(
                         type='text',
                         text=before_text.strip()
                     ))
             
             # Add block
             if block_text:
-                blocks_list.append(RequestBlock(
+                blocks_list.append(TextBlock(
                     type=block_type,
                     text=block_text
                 ))
@@ -227,17 +226,19 @@ def process_content_blocks(content: str, blocks_list: List[RequestBlock]) -> Non
         if last_end < len(content):
             remaining_text = content[last_end:]
             if remaining_text.strip():
-                blocks_list.append(RequestBlock(
+                blocks_list.append(TextBlock(
                     type='text',
                     text=remaining_text.strip()
                 ))
     else:
         # No blocks, just add the text
         if content.strip():
-            blocks_list.append(RequestBlock(
+            blocks_list.append(TextBlock(
                 type='text',
                 text=content.strip()
             ))
+            
+    return blocks_list
 
 
 def parse_request(log_files: LogFiles) -> AnthropicRequest:
@@ -259,21 +260,33 @@ def parse_request(log_files: LogFiles) -> AnthropicRequest:
                 body = json.load(f)
                 # Extract system and messages fields
                 if 'system' in body:
-                    request.system = body['system']
+                    request.system = TextBlock(
+                        type=body['system'][0]['type'],
+                        text=body['system'][0]['text']
+                    )
                 if 'messages' in body:
-                    request.messages = body['messages']
+                    # Make a deep copy of messages to avoid modifying the original
+                    request.messages = body['messages'].copy()
                 
-                # Process content blocks to extract any XML-like tags
-                if 'messages' in body and body['messages']:
-                    for message in body['messages']:
+                    # Process content blocks to extract any XML-like tags
+                    for message in request.messages:
                         if 'content' in message:
                             if isinstance(message['content'], str):
+                                # Process string content into a list of TextBlock objects
                                 content = message['content']
-                                process_content_blocks(content, request.blocks)
+                                message['content'] = process_content_blocks(content)
                             elif isinstance(message['content'], list):
+                                # Process each content item in the list
+                                processed_content = []
                                 for content_item in message['content']:
                                     if isinstance(content_item, dict) and 'text' in content_item:
-                                        process_content_blocks(content_item['text'], request.blocks)
+                                        # Process text into TextBlock objects
+                                        text_blocks = process_content_blocks(content_item['text'])
+                                        processed_content.extend(text_blocks)
+                                    else:
+                                        # Keep non-text content items as is
+                                        processed_content.append(content_item)
+                                message['content'] = processed_content
             except json.JSONDecodeError:
                 print(f"Error: Failed to parse request body as JSON: {log_files.req_payload}", file=sys.stderr)
     else:

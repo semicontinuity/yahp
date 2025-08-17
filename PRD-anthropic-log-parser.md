@@ -75,9 +75,56 @@ data: {"type":"message_stop"       }
 
 Here is the example of restructured HTTP request at the output:
 
-```{"request":{"system":[{"text":"You are ...""}], "messages":[{"role":"user"}] }}```
+```
+{
+  "request": {
+    "system": {
+      "type": "text",
+      "text": "You are ..."
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Regular text content"
+          },
+          {
+            "type": "thinking",
+            "text": "This is a thinking block"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 Here is the example of restructured HTTP response at the output:
 
-```{"response":{"message":{"id":20250816T140740"}, "content":[{"type":"text","data":[{"type":"thoughts","text":"I need to understand the issue"}, {"type":"text","text":"OK"}]}]  }}```
+```
+{
+  "response": {
+    "message": {
+      "id": "msg_018dSxFH9nFU1QaPVuXdUoXF"
+    },
+    "content": [
+      {
+        "type": "text",
+        "data": [
+          {
+            "type": "thinking",
+            "text": "I need to understand the issue"
+          },
+          {
+            "type": "text",
+            "text": "OK"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
