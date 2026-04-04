@@ -509,6 +509,8 @@ def process_log_files(log_files_groups: Dict[str, LogFiles]) -> List[LogEntry]:
         
         results.append(log_entry)
     
+    # Sort results by timestamp before returning
+    results.sort(key=lambda entry: entry.ts)
     return results
 
 

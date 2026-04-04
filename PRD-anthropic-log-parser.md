@@ -10,6 +10,26 @@ The primary objective of Parser is to read log files, and transform them to anot
 
 ## Functional Requirements
 
+### Data Structures
+
+The parser uses the following key data structures:
+
+* `TextBlock`: A fundamental structure representing a block of text with a type
+  * `type`: String indicating the type of block (e.g., "text", "thinking", or any XML-like tag name)
+  * `text`: The actual text content of the block
+
+* `ContentBlock`: Represents a content block from the Anthropic API response
+  * `type`: String indicating the type of content (e.g., "text")
+  * `data`: List of TextBlock objects
+
+* `AnthropicRequest`: Represents a parsed request to the Anthropic API
+  * `system`: A TextBlock object containing the system prompt
+  * `messages`: List of message objects, each with a content field containing TextBlock objects
+
+* `AnthropicResponse`: Represents a parsed response from the Anthropic API
+  * `message`: Message information with ID
+  * `content`: List of ContentBlock objects
+
 ### Core Functionality
 
 Parser shall be implemented as a Python application `log-parser-anthropic.py` with the following core functionality:
@@ -27,17 +47,19 @@ Output must be produced in JSON lines format, where every line is JSON with info
 
 Every line, in JSON format, must contain these fields:
 *`ts`: timestamp (prefix of log file name)
-*`request`: object with fields `system` and `messages`, copied from request
+*`request`: object with fields `system` and `messages`:
+  * `system`: a `TextBlock` object with `type` and `text` fields
+  * `messages`: array of message objects, where each message's `content` field is an array of `TextBlock` objects
 *`response`: restructured contents of response (which is of type `text/event-stream`):
   * `message` field:
     * `id` sub-field: taken from `message_start` event
   * `content` field: is array of objects, corresponding to `content_block_start`, `content_block_delta` messages; `index` identifies the particular content object
     * `type` sub-field: taken from `type` of `content_block_start`.
-    * `data` sub-field: is an array, encapsulating (text) content
+    * `data` sub-field: is an array of `TextBlock` objects, encapsulating (text) content
       * text is taken from all `content_block_start`, `content_block_delta` events and concatenated
       * then, it is split into 'blocks':
-        * if there is a part of text, enclosed in `<thinking>` and `</thinking>`, it becomes `thoughts` block
-        * otherwise, it is `text` block
+        * if there is a part of text, enclosed in XML-like tags (e.g., `<thinking>...</thinking>`), it becomes a block with the tag name as its type
+        * otherwise, it is a `text` block
         
 Here is the example of HTTP response to be parsed:
 

@@ -22,9 +22,28 @@ import yaml
 import requests
 import shutil
 import re
+import ssl
 
 # Global variables
 VERY_VERBOSE = False
+
+
+def get_system_ca_bundle() -> str | None:
+    """Get the system CA bundle path for SSL verification.
+
+    Returns:
+        Path to system CA bundle, or None to use default verification.
+    """
+    # Try to get system CA paths from ssl module
+    ssl_paths = ssl.get_default_verify_paths()
+
+    # Prefer capath (directory of individual certs) over cafile (bundle file)
+    # This uses /usr/lib/ssl/certs instead of /usr/lib/ssl/cert.pem
+    if ssl_paths.openssl_capath:
+        return ssl_paths.openssl_capath
+    if ssl_paths.openssl_cafile:
+        return ssl_paths.openssl_cafile
+    return None
 
 
 # Configure logging
@@ -134,27 +153,34 @@ def create_request_handler(config: Config) -> type:
         
         def do_method(self, method: str) -> None:
             """Handle HTTP request with any method.
-            
+
             Args:
                 method: HTTP method (GET, POST, etc.)
             """
             if VERY_VERBOSE:
                 print(f"\nREQUEST RECEIVED: {method} {self.path}")
-                
+
             request_time = datetime.now().astimezone().isoformat()
             request_id = int(time.time() * 1000)
-            
+
             # Parse request
             url = self.path
             headers: dict[str, str] = {k: v for k, v in self.headers.items()}
-            
+
             # Add special headers for routing
             headers[':path'] = url
             headers[':method'] = method
-            
+
             # Get request body
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length) if content_length > 0 else b''
+            transfer_encoding = self.headers.get('Transfer-Encoding', '').lower()
+            
+            # Handle chunked transfer encoding
+            if 'chunked' in transfer_encoding:
+                # For chunked encoding, read until we hit the end of chunked stream
+                body = self.read_chunked_body()
+            else:
+                body = self.rfile.read(content_length) if content_length > 0 else b''
             
             # Match rule
             if VERY_VERBOSE:
@@ -168,17 +194,21 @@ def create_request_handler(config: Config) -> type:
             if matched_rule:
                 rule_id = self.config.get_rule_id(matched_rule)
                 self.rule_matched = matched_rule
-                
+
                 # Prepare headers for forwarding - do this before logging
                 forwarded_headers = modified_headers.copy()
-                
+
                 # Remove special headers and old Host header
-                for special_header in [':path', ':method', 'Host']:
+                for special_header in [':path', ':method', 'Host', 'Connection', 'Transfer-Encoding']:
                     if special_header in forwarded_headers:
                         if VERY_VERBOSE:
                             logger.debug(f"Removing header: {special_header}")
                         del forwarded_headers[special_header]
-                
+
+                # Set Content-Length header for the body we're sending
+                if body:
+                    forwarded_headers['Content-Length'] = str(len(body))
+
                 # Set new Host header to the value from the config file
                 if target_host:
                     forwarded_headers['Host'] = target_host
@@ -302,11 +332,11 @@ def create_request_handler(config: Config) -> type:
         
         def check_condition(self, condition: RuleCondition, headers: dict[str, str]) -> bool:
             """Check if a condition matches.
-            
+
             Args:
                 condition: Condition to check.
                 headers: Request headers.
-                
+
             Returns:
                 True if condition matches, False otherwise.
             """
@@ -314,13 +344,54 @@ def create_request_handler(config: Config) -> type:
                 header_name = condition['header']
                 if header_name not in headers:
                     return False
-                
+
                 header_value = headers[header_name]
-                
+
                 if 'prefix' in condition:
                     return header_value.startswith(condition['prefix'])
-            
+
             return False
+
+        def read_chunked_body(self) -> bytes:
+            """Read chunked transfer encoding body.
+
+            Returns:
+                The complete body as bytes.
+            """
+            body = b''
+            while True:
+                # Read chunk size line
+                chunk_size_line = b''
+                while True:
+                    byte = self.rfile.read(1)
+                    if byte == b'\n':
+                        break
+                    if byte:
+                        chunk_size_line += byte
+                    else:
+                        # EOF reached
+                        return body
+                
+                # Parse chunk size (may include chunk extensions after ;)
+                chunk_size_str = chunk_size_line.decode('ascii').strip()
+                if ';' in chunk_size_str:
+                    chunk_size_str = chunk_size_str.split(';')[0]
+                chunk_size = int(chunk_size_str, 16)
+                
+                if chunk_size == 0:
+                    # Final chunk - read trailing headers and final CRLF
+                    while True:
+                        line = self.rfile.read(2)
+                        if line == b'\r\n' or not line:
+                            break
+                    return body
+                
+                # Read chunk data
+                chunk_data = self.rfile.read(chunk_size)
+                body += chunk_data
+                
+                # Read CRLF after chunk
+                self.rfile.read(2)  # Skip \r\n
         
         def forward_request(self, method: str, host: str | None, protocol: str | None, 
                            headers: dict[str, str], forwarded_headers: dict[str, str], 
@@ -362,6 +433,11 @@ def create_request_handler(config: Config) -> type:
                 # Check if we need to handle streaming responses
                 is_streaming_request = False
                 
+                # Get system CA bundle for SSL verification
+                ca_bundle = get_system_ca_bundle()
+                if VERY_VERBOSE and ca_bundle:
+                    logger.debug(f"Using system CA bundle: {ca_bundle}")
+
                 # For streaming responses, we need to use stream=True
                 response = requests.request(
                     method=method,
@@ -370,7 +446,8 @@ def create_request_handler(config: Config) -> type:
                     data=body,
                     allow_redirects=False,
                     timeout=30,
-                    stream=True  # Enable streaming for all requests
+                    stream=True,  # Enable streaming for all requests
+                    verify=ca_bundle if ca_bundle else True  # Use system certs or default verification
                 )
                 
                 # Check if response is chunked or event-stream
