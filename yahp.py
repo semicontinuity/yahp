@@ -215,13 +215,14 @@ def create_request_handler(config: Config) -> type:
                     logger.warning("No host specified for forwarding request")
                 
                 # Log request with headers as they will be sent to the upstream server
-                self.log_http_request(request_time, rule_id, headers, forwarded_headers, modified_headers[':path'], body)
-                
+                logs_path = self.resolve_logs_path(headers)
+                self.log_http_request(request_time, rule_id, original_headers=headers, forwarded_headers=forwarded_headers, path=modified_headers[':path'], body=body, logs_path=logs_path)
+
                 # Forward request
                 response = self.forward_request(method, target_host, target_protocol, modified_headers, forwarded_headers, body)
-                
+
                 # Log response
-                self.log_http_response(request_time, rule_id, response)
+                self.log_http_response(request_time, rule_id, response, logs_path=logs_path)
                 
                 # Check if response is chunked or event-stream
                 is_chunked = 'Transfer-Encoding' in response.headers and 'chunked' in response.headers['Transfer-Encoding'].lower()
@@ -474,8 +475,16 @@ def create_request_handler(config: Config) -> type:
                     content=f"Failed to forward request: {e}"
                 )
         
-        def log_http_request(self, timestamp: str, rule_id: str, original_headers: dict[str, str], 
-                            forwarded_headers: dict[str, str], path: str, body: bytes) -> None:
+        def resolve_logs_path(self, headers: dict[str, str]) -> str:
+            session_id = headers.get('x-claude-code-session-id', headers.get('X-Claude-Code-Session-Id', ''))
+            if session_id:
+                path = os.path.join(self.config.logs_path, session_id)
+                os.makedirs(path, exist_ok=True)
+                return path
+            return self.config.logs_path
+
+        def log_http_request(self, timestamp: str, rule_id: str, original_headers: dict[str, str],
+                            forwarded_headers: dict[str, str], path: str, body: bytes, logs_path: str = None) -> None:
             """Log HTTP request to files.
             
             Args:
@@ -487,70 +496,63 @@ def create_request_handler(config: Config) -> type:
                 body: Request body.
             """
             # Format timestamp for filename
+            if logs_path is None:
+                logs_path = self.config.logs_path
             ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
-            
+
             # Log headers - use forwarded headers to show what was sent to upstream server
-            header_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.h.txt")
+            header_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.h.txt")
             with open(header_file, 'w') as f:
                 f.write(f"{original_headers[':method']} {path} HTTP/1.1\n")
                 # Log the forwarded headers, including the Host header
                 for key, value in forwarded_headers.items():
                     f.write(f"{key}: {value}\n")
-            
+
             # Log body only if it's not empty
             if body and len(body) > 0:
                 # Determine content type from headers and trust it
                 content_type = original_headers.get('content-type', original_headers.get('Content-Type', '')).lower()
-                
+
                 if 'application/json' in content_type or content_type.endswith('+json'):
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.p.json")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.json")
                     with open(body_file, 'wb') as f:
                         f.write(body)
                 elif content_type.startswith('text/'):
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.p.txt")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.txt")
                     with open(body_file, 'wb') as f:
                         f.write(body)
                 else:
-                    # Binary data
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.p.bin")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.bin")
                     with open(body_file, 'wb') as f:
                         f.write(body)
         
-        def log_http_response(self, timestamp: str, rule_id: str, response: requests.Response | FakeResponse) -> None:
-            """Log HTTP response to files.
-            
-            Args:
-                timestamp: Request timestamp.
-                rule_id: Rule ID.
-                response: Response object.
-            """
-            # Format timestamp for filename
+        def log_http_response(self, timestamp: str, rule_id: str, response: requests.Response | FakeResponse, logs_path: str = None) -> None:
+            """Log HTTP response to files."""
+            if logs_path is None:
+                logs_path = self.config.logs_path
             ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
-            
+
             # Log headers
-            header_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.res.h.txt")
+            header_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.h.txt")
             with open(header_file, 'w') as f:
                 f.write(f"HTTP/1.1 {response.status_code}\n")
                 for key, value in response.headers.items():
                     f.write(f"{key}: {value}\n")
-            
+
             # Log body only if it's not empty
             if response.content and len(response.content) > 0:
-                # Determine content type from headers and trust it
                 content_type = response.headers.get('Content-Type', '').lower()
-                
+
                 if 'application/json' in content_type or content_type.endswith('+json'):
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.res.p.json")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.json")
                     with open(body_file, 'wb') as f:
                         f.write(response.content)
                 elif content_type.startswith('text/'):
-                    # Text content
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.res.p.txt")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.txt")
                     with open(body_file, 'wb') as f:
                         f.write(response.content)
                 else:
-                    # Binary data
-                    body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.res.p.bin")
+                    body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.bin")
                     with open(body_file, 'wb') as f:
                         f.write(response.content)
         
