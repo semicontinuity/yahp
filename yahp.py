@@ -7,22 +7,19 @@ and logs all requests and responses in a structured way.
 """
 
 import argparse
-import json
+import hashlib
 import logging
 import os
+import ssl
 import sys
 import time
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, urljoin
-import hashlib
 from typing import TypedDict
-import yaml
+
 import requests
-import shutil
-import re
-import ssl
+import yaml
 
 # Global variables
 VERY_VERBOSE = False
@@ -469,7 +466,7 @@ def create_request_handler(config: Config) -> type:
                     print(f"RESPONSE FROM TARGET: {response.status_code}")
                 return response
             except Exception as e:
-                logger.error(f"Failed to forward request: {e}")
+                logger.error(f"Failed to forward request: {e} headers={headers}")
                 # Create a fake response
                 return FakeResponse(
                     status_code=502,
@@ -503,7 +500,7 @@ def create_request_handler(config: Config) -> type:
             # Log body only if it's not empty
             if body and len(body) > 0:
                 # Determine content type from headers and trust it
-                content_type = original_headers.get('Content-Type', '').lower()
+                content_type = original_headers.get('content-type', original_headers.get('Content-Type', '')).lower()
                 
                 if 'application/json' in content_type or content_type.endswith('+json'):
                     body_file = os.path.join(self.config.logs_path, f"{ts}-{rule_id}.req.p.json")
