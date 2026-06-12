@@ -17,7 +17,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
 from yahp_common import (
-    Config, FakeResponse, Rule,
+    Config, Rule,
     match_rule, read_chunked_body,
     resolve_logs_path, log_http_request, log_http_response,
     get_system_ca_bundle,
@@ -215,6 +215,8 @@ class StreamingTranslator:
             self._started = True
             self._msg_id = chunk.get('id', '')
             self._model = chunk.get('model', '')
+            if self._model:
+                print(f"[OUTBOUND-STREAM] model={self._model}", file=sys.stderr, flush=True)
             out.append(self._sse('message_start', {
                 'type': 'message_start',
                 'message': {
@@ -269,7 +271,7 @@ class StreamingTranslator:
             }))
 
         # Tool call deltas
-        for tc_delta in delta.get('tool_calls', []):
+        for tc_delta in delta.get('tool_calls') or []:
             oai_idx = tc_delta.get('index', 0)
 
             if oai_idx not in self._tool_call_index_map:
@@ -379,7 +381,8 @@ def create_request_handler(config: Config) -> type:
             super().__init__(*args, **kwargs)
 
         def do_POST(self):
-            if not self.path.endswith('/v1/messages'):
+            path_without_query = self.path.split('?')[0]
+            if not path_without_query.endswith('/v1/messages'):
                 self._404(f"Only paths ending in /v1/messages are supported; got POST {self.path}")
                 return
             self._handle()
@@ -404,6 +407,60 @@ def create_request_handler(config: Config) -> type:
             self.end_headers()
             self.wfile.write(body)
 
+        def _read_body(self) -> bytes:
+            content_length = int(self.headers.get('Content-Length', 0))
+            transfer_encoding = self.headers.get('Transfer-Encoding', '').lower()
+            if 'chunked' in transfer_encoding:
+                return read_chunked_body(self.rfile)
+            return self.rfile.read(content_length) if content_length > 0 else b''
+
+        def _build_outbound(self, anthropic_body: dict, matched_rule: dict, modified_headers: dict) -> tuple[str, bytes]:
+            """Return (upstream_path, outbound_body_bytes)."""
+            target_api_protocol = matched_rule.get('then', {}).get('protocol', 'openai')
+            rewritten_path = modified_headers[':path']
+            rewritten_path_base, _, rewritten_query = rewritten_path.partition('?')
+            override_model = matched_rule.get('then', {}).get('model')
+
+            if target_api_protocol == 'openai':
+                upstream_path = rewritten_path_base[:-len('/v1/messages')] + '/v1/chat/completions'
+                if rewritten_query:
+                    upstream_path += '?' + rewritten_query
+                outbound_body = translate_anthropic_to_openai(anthropic_body)
+                if override_model:
+                    print(f"[MODEL-OVERRIDE] {outbound_body.get('model')} -> {override_model}", file=sys.stderr, flush=True)
+                    outbound_body['model'] = override_model
+            else:
+                upstream_path = rewritten_path
+                outbound_body = dict(anthropic_body)
+                if override_model:
+                    print(f"[MODEL-OVERRIDE] {outbound_body.get('model')} -> {override_model}", file=sys.stderr, flush=True)
+                    outbound_body['model'] = override_model
+
+            return upstream_path, json.dumps(outbound_body).encode()
+
+        def _build_forwarded_headers(self, raw_headers: dict, target_host: str, body_bytes: bytes) -> dict:
+            forwarded_headers = translate_headers(raw_headers)
+            for h in [':path', ':method', 'Host', 'Connection', 'Transfer-Encoding', 'Content-Length']:
+                forwarded_headers.pop(h, None)
+            forwarded_headers['Host'] = target_host
+            forwarded_headers['Content-Type'] = 'application/json'
+            forwarded_headers['Content-Length'] = str(len(body_bytes))
+            return forwarded_headers
+
+        def _post_upstream(self, target_protocol: str, target_host: str, upstream_path: str,
+                           forwarded_headers: dict, body_bytes: bytes):
+            upstream_url = f"{target_protocol}://{target_host}{upstream_path}"
+            ca_bundle = get_system_ca_bundle()
+            return requests.post(
+                upstream_url,
+                headers={k: v for k, v in forwarded_headers.items() if k != 'Host'},
+                data=body_bytes,
+                allow_redirects=False,
+                timeout=120,
+                stream=True,
+                verify=ca_bundle if ca_bundle else True,
+            )
+
         def _handle(self):
             request_time = datetime.now().astimezone().isoformat()
 
@@ -411,88 +468,60 @@ def create_request_handler(config: Config) -> type:
             raw_headers[':path'] = self.path
             raw_headers[':method'] = 'POST'
 
-            content_length = int(self.headers.get('Content-Length', 0))
-            transfer_encoding = self.headers.get('Transfer-Encoding', '').lower()
+            try:
+                anthropic_body = json.loads(self._read_body())
+            except json.JSONDecodeError:
+                self._send_error(400, "Invalid JSON request body")
+                return
 
-            if 'chunked' in transfer_encoding:
-                raw_body = read_chunked_body(self.rfile)
-            else:
-                raw_body = self.rfile.read(content_length) if content_length > 0 else b''
+            inbound_model = anthropic_body.get('model')
+            if inbound_model:
+                logger.info(f"[INBOUND] model={inbound_model}")
 
-            # Match rule
-            matched_rule, target_host, target_protocol, modified_headers = match_rule(self.config, raw_headers)
-
+            matched_rule, target_host, target_protocol, modified_headers = match_rule(
+                self.config, raw_headers, model=inbound_model
+            )
             if not matched_rule:
                 self._404("No matching rule found")
                 return
 
             rule_id = self.config.get_rule_id(matched_rule)
+            target_api_protocol = matched_rule.get('then', {}).get('protocol', 'openai')
 
-            # Derive upstream path: replace /v1/messages suffix with /v1/chat/completions
-            rewritten_path = modified_headers[':path']
-            upstream_path = rewritten_path[:-len('/v1/messages')] + '/v1/chat/completions'
+            upstream_path, outbound_body_bytes = self._build_outbound(anthropic_body, matched_rule, modified_headers)
             logger.info(f"path: {self.path} -> {upstream_path} on {target_host}")
 
-            # Translate request body
-            try:
-                anthropic_body = json.loads(raw_body)
-            except json.JSONDecodeError:
-                self._send_error(400, "Invalid JSON request body")
-                return
-
-            openai_body = translate_anthropic_to_openai(anthropic_body)
-            openai_body_bytes = json.dumps(openai_body).encode()
-
-            # Translate headers
-            forwarded_headers = translate_headers(raw_headers)
-
-            # Remove hop-by-hop / special headers
-            for h in [':path', ':method', 'Host', 'Connection', 'Transfer-Encoding',
-                      'Content-Length']:
-                forwarded_headers.pop(h, None)
-
-            forwarded_headers['Host'] = target_host
-            forwarded_headers['Content-Type'] = 'application/json'
-            forwarded_headers['Content-Length'] = str(len(openai_body_bytes))
-
-            # Build fake original_headers for log_http_request (needs :method)
-            log_headers = {':method': 'POST', 'Content-Type': 'application/json'}
+            forwarded_headers = self._build_forwarded_headers(raw_headers, target_host, outbound_body_bytes)
 
             logs_path = resolve_logs_path(self.config, raw_headers)
             log_http_request(
                 request_time, rule_id,
-                original_headers=log_headers,
+                original_headers={':method': 'POST', 'Content-Type': 'application/json'},
                 forwarded_headers=forwarded_headers,
                 path=upstream_path,
-                body=openai_body_bytes,
+                body=outbound_body_bytes,
                 logs_path=logs_path,
             )
 
-            # Forward to upstream
-            upstream_url = f"{target_protocol}://{target_host}{upstream_path}"
             try:
-                ca_bundle = get_system_ca_bundle()
-                response = requests.post(
-                    upstream_url,
-                    headers={k: v for k, v in forwarded_headers.items()
-                             if k not in ('Host',)},
-                    data=openai_body_bytes,
-                    allow_redirects=False,
-                    timeout=120,
-                    stream=True,
-                    verify=ca_bundle if ca_bundle else True,
-                )
+                response = self._post_upstream(target_protocol, target_host, upstream_path,
+                                               forwarded_headers, outbound_body_bytes)
             except Exception as e:
                 logger.error(f"Failed to forward request: {e}")
                 self._send_error(502, f"Failed to forward request: {e}")
                 return
 
             is_streaming = anthropic_body.get('stream', False)
-
-            if is_streaming:
-                self._handle_streaming(response, request_time, rule_id, logs_path)
+            if target_api_protocol == 'openai':
+                if is_streaming:
+                    self._handle_streaming(response, request_time, rule_id, logs_path)
+                else:
+                    self._handle_nonstreaming(response, request_time, rule_id, logs_path)
             else:
-                self._handle_nonstreaming(response, request_time, rule_id, logs_path)
+                if is_streaming:
+                    self._handle_streaming_passthrough(response, request_time, rule_id, logs_path)
+                else:
+                    self._handle_nonstreaming_passthrough(response, request_time, rule_id, logs_path)
 
         def _handle_models(self):
             request_time = datetime.now().astimezone().isoformat()
@@ -565,6 +594,42 @@ def create_request_handler(config: Config) -> type:
             self.send_header('Content-Length', str(len(body_bytes)))
             self.end_headers()
             self.wfile.write(body_bytes)
+
+        def _handle_nonstreaming_passthrough(self, response, request_time, rule_id, logs_path):
+            response.content
+            log_http_response(request_time, rule_id, response, logs_path)
+            self.send_response(response.status_code)
+            for k, v in response.headers.items():
+                if k.lower() not in ('transfer-encoding', 'content-encoding'):
+                    self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(response.content)
+
+        def _handle_streaming_passthrough(self, response, request_time, rule_id, logs_path):
+            raw_lines = []
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if raw_line:
+                    raw_lines.append(raw_line)
+                line_bytes = (raw_line + '\n').encode()
+                self.wfile.write(f"{len(line_bytes):X}\r\n".encode())
+                self.wfile.write(line_bytes + b"\r\n")
+
+            self.wfile.write(b"0\r\n\r\n")
+
+            raw_body = '\n'.join(raw_lines).encode()
+
+            class _FakeStreamResponse:
+                status_code = response.status_code
+                headers = dict(response.headers)
+                content = raw_body
+
+            log_http_response(request_time, rule_id, _FakeStreamResponse(), logs_path)
 
         def _handle_nonstreaming(self, response, request_time, rule_id, logs_path):
             # Read full response
