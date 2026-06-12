@@ -416,8 +416,12 @@ def create_request_handler(config: Config) -> type:
 
         def _build_outbound(self, anthropic_body: dict, matched_rule: dict, modified_headers: dict) -> tuple[str, bytes]:
             """Return (upstream_path, outbound_body_bytes)."""
-            target_api_protocol = matched_rule.get('then', {}).get('protocol', 'openai')
             rewritten_path = modified_headers[':path']
+            then = matched_rule.get('then', {})
+            if 'protocol' in then:
+                target_api_protocol = then['protocol']
+            else:
+                target_api_protocol = 'anthropic' if 'anthropic' in rewritten_path else 'openai'
             rewritten_path_base, _, rewritten_query = rewritten_path.partition('?')
             override_model = matched_rule.get('then', {}).get('model')
 
@@ -436,7 +440,7 @@ def create_request_handler(config: Config) -> type:
                     print(f"[MODEL-OVERRIDE] {outbound_body.get('model')} -> {override_model}", file=sys.stderr, flush=True)
                     outbound_body['model'] = override_model
 
-            return upstream_path, json.dumps(outbound_body).encode()
+            return upstream_path, json.dumps(outbound_body).encode(), target_api_protocol
 
         def _build_forwarded_headers(self, raw_headers: dict, target_host: str, body_bytes: bytes) -> dict:
             forwarded_headers = translate_headers(raw_headers)
@@ -486,9 +490,9 @@ def create_request_handler(config: Config) -> type:
                 return
 
             rule_id = self.config.get_rule_id(matched_rule)
-            target_api_protocol = matched_rule.get('then', {}).get('protocol', 'openai')
+            logger.info(f"Matched rule: {matched_rule['name']}")
 
-            upstream_path, outbound_body_bytes = self._build_outbound(anthropic_body, matched_rule, modified_headers)
+            upstream_path, outbound_body_bytes, target_api_protocol = self._build_outbound(anthropic_body, matched_rule, modified_headers)
             logger.info(f"path: {self.path} -> {upstream_path} on {target_host}")
 
             forwarded_headers = self._build_forwarded_headers(raw_headers, target_host, outbound_body_bytes)

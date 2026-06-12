@@ -43,10 +43,19 @@ class TextBlock:
 
 
 @dataclass
+class ToolUseBlock:
+    """A tool use block from the Anthropic API response."""
+    id: str
+    name: str
+    input: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ContentBlock:
     """A content block from the Anthropic API response."""
     type: str
     data: List[TextBlock] = field(default_factory=list)
+    tool_use: Optional['ToolUseBlock'] = None
 
 
 @dataclass
@@ -361,49 +370,79 @@ def parse_event_stream(content: str) -> AnthropicResponse:
             if 'index' in data_json and 'content_block' in data_json:
                 index = data_json['index']
                 content_block = data_json['content_block']
-                
+                block_type = content_block.get('type', '')
+
                 if index not in content_blocks:
-                    content_blocks[index] = {
-                        'type': content_block.get('type', ''),
-                        'text': content_block.get('text', '')
-                    }
-        
+                    if block_type == 'tool_use':
+                        content_blocks[index] = {
+                            'type': 'tool_use',
+                            'id': content_block.get('id', ''),
+                            'name': content_block.get('name', ''),
+                            'input_json': ''
+                        }
+                    else:
+                        content_blocks[index] = {
+                            'type': block_type,
+                            'text': content_block.get('text', '')
+                        }
+
         elif event_type == 'content_block_delta':
             if 'index' in data_json and 'delta' in data_json:
                 index = data_json['index']
                 delta = data_json['delta']
-                
+
                 if index not in content_blocks:
                     content_blocks[index] = {'type': 'text', 'text': ''}
-                
-                if 'type' in delta and delta['type'] == 'text_delta' and 'text' in delta:
+
+                delta_type = delta.get('type', '')
+                if delta_type == 'text_delta' and 'text' in delta:
                     content_blocks[index]['text'] += delta['text']
+                elif delta_type == 'input_json_delta' and 'partial_json' in delta:
+                    content_blocks[index]['input_json'] = content_blocks[index].get('input_json', '') + delta['partial_json']
     
     # Process content blocks to extract thoughts and text
-    for index, block in content_blocks.items():
+    for index, block in sorted(content_blocks.items()):
         content_type = block.get('type', 'text')
+
+        if content_type == 'tool_use':
+            # Parse accumulated input JSON
+            input_json_str = block.get('input_json', '')
+            try:
+                parsed_input = json.loads(input_json_str) if input_json_str.strip() else {}
+            except json.JSONDecodeError:
+                parsed_input = {'_raw': input_json_str}
+
+            tool_use_block = ToolUseBlock(
+                id=block.get('id', ''),
+                name=block.get('name', ''),
+                input=parsed_input
+            )
+            content_block = ContentBlock(type=content_type, tool_use=tool_use_block)
+            response.content.append(content_block)
+            continue
+
         text = block.get('text', '')
-        
+
         # Create a content block entry
         content_block = ContentBlock(type=content_type)
-        
+
         # General pattern to find any XML-like tag
         tag_pattern = re.compile(r'<([a-zA-Z_][a-zA-Z0-9_]*)>(.*?)</\1>', re.DOTALL)
-        
+
         # Find all blocks of any type
         all_matches = []
         for match in tag_pattern.finditer(text):
             block_type = match.group(1)  # The tag name
             block_content = match.group(2).strip()  # The content between tags
             all_matches.append((match.start(), match.end(), block_type, block_content))
-        
+
         # Sort matches by start position
         all_matches.sort(key=lambda x: x[0])
-        
+
         if all_matches:
             # Process text with blocks
             last_end = 0
-            
+
             for start, end, block_type, block_text in all_matches:
                 # Add text before block
                 if start > last_end:
@@ -413,16 +452,16 @@ def parse_event_stream(content: str) -> AnthropicResponse:
                             type='text',
                             text=before_text.strip()
                         ))
-                
+
                 # Add block
                 if block_text:
                     content_block.data.append(TextBlock(
                         type=block_type,
                         text=block_text
                     ))
-                
+
                 last_end = end
-            
+
             # Add remaining text after last block
             if last_end < len(text):
                 remaining_text = text[last_end:]
@@ -438,7 +477,7 @@ def parse_event_stream(content: str) -> AnthropicResponse:
                     type='text',
                     text=text.strip()
                 ))
-        
+
         # Add content block to response
         if content_block.data:
             response.content.append(content_block)
