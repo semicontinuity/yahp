@@ -216,7 +216,7 @@ class StreamingTranslator:
             self._msg_id = chunk.get('id', '')
             self._model = chunk.get('model', '')
             if self._model:
-                print(f"[OUTBOUND-STREAM] model={self._model}", file=sys.stderr, flush=True)
+                logger.info(f"[OUTBOUND-STREAM] model={self._model}")
             out.append(self._sse('message_start', {
                 'type': 'message_start',
                 'message': {

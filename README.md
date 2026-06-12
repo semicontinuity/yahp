@@ -137,6 +137,47 @@ Note:
 - If a request or response has no body, no body file will be created.
 - For chunked or streaming responses, the proxy will stream the response to the client as it arrives from the server.
 
+## Proxy
+
+The `proxy-antropic-openai.py` script is an Anthropic-to-OpenAI translating proxy. It accepts Anthropic Messages API requests, translates them to OpenAI Chat Completions format, forwards to a configured OpenAI-compatible backend, and translates responses back.
+
+### Features
+
+- Translates Anthropic Messages API to OpenAI Chat Completions
+- Translates OpenAI responses back to Anthropic format
+- Supports streaming responses (SSE) with real-time translation
+- Supports `/v1/models` endpoint with format translation
+- Protocol auto-detection: when `protocol` is not specified in the rule, it defaults to `anthropic` if the path contains "anthropic", otherwise `openai`
+
+### Usage
+
+```bash
+./proxy-antropic-openai.py
+```
+
+Command-line options:
+
+- `-c, --config`: Path to the configuration file
+- `-p, --port`: Port to listen on (default: 6666)
+- `-v, --verbose`: Enable verbose logging
+- `-vv, --very-verbose`: Enable very verbose logging
+
+### Example Configuration
+
+```yaml
+rules:
+  - name: anthropic-to-openai
+    when:
+      - header: :path
+        prefix: /v1/messages
+    then:
+      - host: api.openai.com
+        protocol: https
+      - header: :path
+        prefix: /openai/v1
+logs-path: /home/user/.local/state/yahp/logs
+```
+
 ## Testing
 
 YAHP includes a comprehensive test suite. To run the tests:
