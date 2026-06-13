@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Explicit strategy registry. Adding a protocol = write the file + one line here."""
 
+import re
+
 from strategies.anthropic import AnthropicStrategy
 from strategies.openai import OpenAIStrategy
+
+RULE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_.-]+$')
 
 # protocol name -> strategy instance
 REGISTRY: dict[str, object] = {
@@ -32,11 +36,12 @@ def resolve_protocols(rule: dict) -> tuple[str, str]:
 
 
 def validate_rules(rules: list[dict]) -> None:
-    """Validate inbound/outbound protocols of every rule.
+    """Validate inbound/outbound protocols of every rule and rule name format.
 
     Raises ConfigError on the first violation:
       - a rule missing when.protocol;
-      - a when/then protocol with no registered strategy.
+      - a when/then protocol with no registered strategy;
+      - a rule name that is empty or contains invalid characters.
     """
     available = ', '.join(available_protocols())
     for rule in rules:
@@ -54,4 +59,13 @@ def validate_rules(rules: list[dict]) -> None:
             raise ConfigError(
                 f"Rule '{name}' then.protocol '{outbound}' has no registered "
                 f"strategy. Available protocols: {available}"
+            )
+
+        # Validate rule name format
+        if not name or name == '<unnamed>':
+            raise ConfigError("Rule name is missing or empty")
+        if not RULE_NAME_PATTERN.match(name):
+            raise ConfigError(
+                f"Rule name '{name}' contains invalid characters. "
+                f"Only alphanumeric, underscore, hyphen, and dot are allowed (^[a-zA-Z0-9_.-]+$)"
             )

@@ -160,67 +160,6 @@ def read_chunked_body(rfile) -> bytes:
         rfile.read(2)
 
 
-def resolve_logs_path(config: Config, headers: dict[str, str]) -> str:
-    session_id = headers.get('x-claude-code-session-id', headers.get('X-Claude-Code-Session-Id', ''))
-    if session_id:
-        path = os.path.join(config.logs_path, session_id)
-        os.makedirs(path, exist_ok=True)
-        return path
-    return config.logs_path
-
-
-def log_http_request(timestamp: str, rule_id: str, original_headers: dict[str, str],
-                     forwarded_headers: dict[str, str], path: str, body: bytes, logs_path: str) -> None:
-    ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
-
-    header_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.h.txt")
-    with open(header_file, 'w') as f:
-        f.write(f"{original_headers[':method']} {path} HTTP/1.1\n")
-        for key, value in forwarded_headers.items():
-            f.write(f"{key}: {value}\n")
-
-    logger.info(f"> {original_headers[':method']} {path}")
-    if logger.isEnabledFor(logging.DEBUG):
-        for key, value in forwarded_headers.items():
-            logger.debug(f">   {key}: {value}")
-
-    if body and len(body) > 0:
-        content_type = original_headers.get('content-type', original_headers.get('Content-Type', '')).lower()
-
-        if 'application/json' in content_type or content_type.endswith('+json'):
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.json")
-        elif content_type.startswith('text/'):
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.txt")
-        else:
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.req.p.bin")
-
-        with open(body_file, 'wb') as f:
-            f.write(body)
-
-
-def log_http_response(timestamp: str, rule_id: str, response: requests.Response | FakeResponse, logs_path: str) -> None:
-    ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
-
-    header_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.h.txt")
-    with open(header_file, 'w') as f:
-        f.write(f"HTTP/1.1 {response.status_code}\n")
-        for key, value in response.headers.items():
-            f.write(f"{key}: {value}\n")
-
-    if response.content and len(response.content) > 0:
-        content_type = response.headers.get('Content-Type', '').lower()
-
-        if 'application/json' in content_type or content_type.endswith('+json'):
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.json")
-        elif content_type.startswith('text/'):
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.txt")
-        else:
-            body_file = os.path.join(logs_path, f"{ts}-{rule_id}.res.p.bin")
-
-        with open(body_file, 'wb') as f:
-            f.write(response.content)
-
-
 def forward_request(method: str, host: str | None, protocol: str | None,
                     headers: dict[str, str], forwarded_headers: dict[str, str],
                     body: bytes) -> requests.Response | FakeResponse:

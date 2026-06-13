@@ -19,9 +19,9 @@ from requests.exceptions import ChunkedEncodingError
 from yahp_common import (
     Config,
     match_rule, read_chunked_body,
-    resolve_logs_path, log_http_request, log_http_response,
     get_system_ca_bundle,
 )
+from conversation_logger import ConversationLogger
 from strategies import (
     REGISTRY, get_strategy, available_protocols,
     resolve_protocols, validate_rules, ConfigError,
@@ -102,7 +102,7 @@ def build_upstream_path(rewritten_path: str, inbound, outbound, operation: str) 
 
 # --- dispatcher -----------------------------------------------------------
 
-def create_request_handler(config: Config) -> type:
+def create_request_handler(config: Config, conv_logger: ConversationLogger) -> type:
 
     class Handler(BaseHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -163,7 +163,8 @@ def create_request_handler(config: Config) -> type:
             outbound = get_strategy(outbound_name)
             operation = inbound.classify(self.path)
             rule_id = self.config.get_rule_id(matched_rule)
-            logger.info(f"Matched rule: {matched_rule.get('name')} "
+            rule_name = matched_rule.get('name', '')
+            logger.info(f"Matched rule: {rule_name} "
                         f"[{inbound_name}->{outbound_name}] op={operation}")
 
             ctx = _ExchangeContext(
@@ -172,7 +173,7 @@ def create_request_handler(config: Config) -> type:
                 target_host=target_host, target_scheme=target_scheme,
                 inbound=inbound, outbound=outbound, operation=operation,
                 body_bytes=body_bytes, matched_rule=matched_rule,
-                logs_path=resolve_logs_path(self.config, raw_headers),
+                rule_name=rule_name,
             )
 
             if inbound_name == outbound_name:
@@ -198,12 +199,13 @@ def create_request_handler(config: Config) -> type:
             forwarded = strip_pseudo_and_hop(ctx.raw_headers)
             forwarded['Host'] = ctx.target_host
 
-            log_http_request(
+            conv_logger.log_request(
                 ctx.request_time, ctx.rule_id,
                 original_headers={':method': ctx.raw_headers[':method'],
                                   'Content-Type': self.headers.get('Content-Type', '')},
                 forwarded_headers=forwarded, path=upstream_path,
-                body=ctx.body_bytes, logs_path=ctx.logs_path,
+                body=ctx.body_bytes, raw_headers=ctx.raw_headers,
+                rule_name=ctx.rule_name,
             )
 
             try:
@@ -220,7 +222,7 @@ def create_request_handler(config: Config) -> type:
 
         def _relay_unary_verbatim(self, response, ctx):
             response.content  # trigger read
-            log_http_response(ctx.request_time, ctx.rule_id, response, ctx.logs_path)
+            conv_logger.log_response(ctx.request_time, ctx.rule_id, response, ctx.raw_headers, ctx.rule_name)
             self.send_response(response.status_code)
             for k, v in response.headers.items():
                 if k.lower() not in ('transfer-encoding', 'content-encoding'):
@@ -278,11 +280,12 @@ def create_request_handler(config: Config) -> type:
                 ctx.raw_headers, ctx.outbound.name, ctx.target_host, len(out_bytes)
             )
 
-            log_http_request(
+            conv_logger.log_request(
                 ctx.request_time, ctx.rule_id,
                 original_headers={':method': 'POST', 'Content-Type': 'application/json'},
                 forwarded_headers=forwarded, path=upstream_path,
-                body=out_bytes, logs_path=ctx.logs_path,
+                body=out_bytes, raw_headers=ctx.raw_headers,
+                rule_name=ctx.rule_name,
             )
 
             try:
@@ -315,11 +318,12 @@ def create_request_handler(config: Config) -> type:
                     forwarded['Authorization'] = f'Bearer {credential}'
             forwarded['Host'] = ctx.target_host
 
-            log_http_request(
+            conv_logger.log_request(
                 ctx.request_time, ctx.rule_id,
                 original_headers={':method': 'GET'},
                 forwarded_headers=forwarded, path=upstream_path,
-                body=b'', logs_path=ctx.logs_path,
+                body=b'', raw_headers=ctx.raw_headers,
+                rule_name=ctx.rule_name,
             )
             try:
                 response = self._forward(ctx, upstream_path, forwarded)
@@ -329,7 +333,7 @@ def create_request_handler(config: Config) -> type:
                 return
 
             response.content  # trigger read
-            log_http_response(ctx.request_time, ctx.rule_id, response, ctx.logs_path)
+            conv_logger.log_response(ctx.request_time, ctx.rule_id, response, ctx.raw_headers, ctx.rule_name)
 
             if response.status_code != 200:
                 self.send_response(response.status_code)
@@ -369,7 +373,7 @@ def create_request_handler(config: Config) -> type:
 
         def _handle_translated_unary(self, response, ctx):
             response.content  # trigger read
-            log_http_response(ctx.request_time, ctx.rule_id, response, ctx.logs_path)
+            conv_logger.log_response(ctx.request_time, ctx.rule_id, response, ctx.raw_headers, ctx.rule_name)
 
             if response.status_code != 200:
                 self.send_response(response.status_code)
@@ -453,7 +457,7 @@ def create_request_handler(config: Config) -> type:
                 headers = dict(response.headers)
                 content = raw_body
 
-            log_http_response(ctx.request_time, ctx.rule_id, _FakeStreamResponse(), ctx.logs_path)
+            conv_logger.log_response(ctx.request_time, ctx.rule_id, _FakeStreamResponse(), ctx.raw_headers, ctx.rule_name)
 
         # --- error response -------------------------------------------
 
@@ -473,7 +477,7 @@ class _ExchangeContext:
 
     def __init__(self, request_time, rule_id, raw_headers, modified_headers,
                  target_host, target_scheme, inbound, outbound, operation,
-                 body_bytes, matched_rule, logs_path):
+                 body_bytes, matched_rule, rule_name):
         self.request_time = request_time
         self.rule_id = rule_id
         self.raw_headers = raw_headers
@@ -485,7 +489,7 @@ class _ExchangeContext:
         self.operation = operation
         self.body_bytes = body_bytes
         self.matched_rule = matched_rule
-        self.logs_path = logs_path
+        self.rule_name = rule_name
 
 
 def main():
@@ -510,7 +514,8 @@ def main():
         logger.error(str(e))
         sys.exit(1)
 
-    handler_class = create_request_handler(config)
+    conv_logger = ConversationLogger(config.logs_path)
+    handler_class = create_request_handler(config, conv_logger)
     server = HTTPServer(('0.0.0.0', args.port), handler_class)
     logger.info(f"Starting universal proxy on port {args.port} "
                 f"(protocols: {', '.join(available_protocols())})")
