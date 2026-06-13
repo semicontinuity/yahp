@@ -482,6 +482,11 @@ def create_request_handler(config: Config) -> type:
             if inbound_model:
                 logger.info(f"[INBOUND] model={inbound_model}")
 
+            if VERY_VERBOSE:
+                logger.debug("[INBOUND HEADERS]")
+                for k, v in raw_headers.items():
+                    logger.debug(f"  {k}: {v}")
+
             matched_rule, target_host, target_protocol, modified_headers = match_rule(
                 self.config, raw_headers, model=inbound_model
             )
@@ -496,6 +501,11 @@ def create_request_handler(config: Config) -> type:
             logger.info(f"path: {self.path} -> {upstream_path} on {target_host}")
 
             forwarded_headers = self._build_forwarded_headers(raw_headers, target_host, outbound_body_bytes)
+
+            if VERY_VERBOSE:
+                logger.debug("[OUTBOUND HEADERS]")
+                for k, v in forwarded_headers.items():
+                    logger.debug(f"  {k}: {v}")
 
             logs_path = resolve_logs_path(self.config, raw_headers)
             log_http_request(
@@ -578,7 +588,6 @@ def create_request_handler(config: Config) -> type:
             logger.info(f"upstream models response: {response.status_code}")
             for k, v in response.headers.items():
                 logger.info(f"  {k}: {v}")
-            logger.info(f"  body: {response.content[:500]}")
 
             if response.status_code != 200:
                 self.send_response(response.status_code)
@@ -714,16 +723,25 @@ def create_request_handler(config: Config) -> type:
     return Handler
 
 
+VERY_VERBOSE = False
+
+
 def main():
     parser = argparse.ArgumentParser(description='proxy-antropi-openai — Anthropic-to-OpenAI translating proxy')
     parser.add_argument('-c', '--config', help='Path to configuration file')
     parser.add_argument('-p', '--port', type=int, default=6666, help='Port to listen on')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
-    parser.add_argument('-vv', '--very-verbose', action='store_true', help='Enable very verbose logging')
+    parser.add_argument('-vv', '--very-verbose', action='store_true', help='Enable very verbose logging with headers')
 
     args = parser.parse_args()
 
-    if args.very_verbose or args.verbose:
+    if args.very_verbose:
+        logger.setLevel(logging.DEBUG)
+        global VERY_VERBOSE
+        VERY_VERBOSE = True
+        logger.debug("Very verbose logging enabled")
+        print("VERY VERBOSE MODE ENABLED - HEADERS WILL BE LOGGED")
+    elif args.verbose:
         logger.setLevel(logging.DEBUG)
 
     config = Config(args.config)
