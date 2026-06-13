@@ -18,7 +18,8 @@ class ConversationLogger:
         agent_id = headers.get('x-claude-code-agent-id', headers.get('X-Claude-Code-Agent-Id', ''))
 
         if session_id:
-            ts = request_time.replace(':', '').replace('+', 'Z+').replace('-', '')
+            # Format: 20260613T144655 (YYYYMMDDTHHMMSS)
+            ts = request_time.replace('-', '').replace(':', '')[:15]
             path = os.path.join(self.base_logs_path, f"{ts}-{session_id}")
         else:
             path = os.path.join(self.base_logs_path, rule_name)
