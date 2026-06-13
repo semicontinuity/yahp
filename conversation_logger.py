@@ -12,13 +12,14 @@ class ConversationLogger:
     def __init__(self, base_logs_path: str):
         self.base_logs_path = base_logs_path
 
-    def _resolve(self, headers: dict[str, str], rule_name: str) -> tuple[str, str | None]:
+    def _resolve(self, headers: dict[str, str], rule_name: str, request_time: str) -> tuple[str, str | None]:
         """Resolve per-conversation logs path and agent id from request headers."""
         session_id = headers.get('x-claude-code-session-id', headers.get('X-Claude-Code-Session-Id', ''))
         agent_id = headers.get('x-claude-code-agent-id', headers.get('X-Claude-Code-Agent-Id', ''))
 
         if session_id:
-            path = os.path.join(self.base_logs_path, f"{rule_name}__{session_id}")
+            ts = request_time.replace(':', '').replace('+', 'Z+').replace('-', '')
+            path = os.path.join(self.base_logs_path, f"{ts}-{session_id}")
         else:
             path = os.path.join(self.base_logs_path, rule_name)
 
@@ -28,7 +29,7 @@ class ConversationLogger:
     def log_request(self, timestamp: str, rule_id: str, original_headers: dict[str, str],
                     forwarded_headers: dict[str, str], path: str, body: bytes,
                     raw_headers: dict[str, str], rule_name: str) -> None:
-        logs_path, agent_id = self._resolve(raw_headers, rule_name)
+        logs_path, agent_id = self._resolve(raw_headers, rule_name, timestamp)
         ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
         file_suffix = f"-{agent_id}" if agent_id else ""
 
@@ -57,7 +58,7 @@ class ConversationLogger:
     def log_response(self, timestamp: str, rule_id: str,
                      response: 'requests.Response | FakeResponse',
                      raw_headers: dict[str, str], rule_name: str) -> None:
-        logs_path, agent_id = self._resolve(raw_headers, rule_name)
+        logs_path, agent_id = self._resolve(raw_headers, rule_name, timestamp)
         ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
         file_suffix = f"-{agent_id}" if agent_id else ""
 
