@@ -75,11 +75,16 @@ def build_translated_headers(raw_headers: dict[str, str], outbound_name: str,
             forwarded['x-api-key'] = credential
             forwarded.setdefault('anthropic-version',
                                  raw_headers.get('anthropic-version', '2023-06-01'))
+            logger.debug(f"[HEADER ADD] x-api-key: {credential!r}")
+            if 'anthropic-version' in forwarded:
+                logger.debug(f"[HEADER ADD] anthropic-version: {forwarded['anthropic-version']!r}")
         else:
             forwarded['Authorization'] = f'Bearer {credential}'
+            logger.debug(f"[HEADER ADD] Authorization: Bearer {credential!r}")
     forwarded['Host'] = target_host
     forwarded['Content-Type'] = 'application/json'
     forwarded['Content-Length'] = str(body_len)
+    logger.debug(f"[HEADER SET] Host: {target_host!r}, Content-Length: {body_len!r}")
     return forwarded
 
 
@@ -196,7 +201,7 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
 
         def _handle_verbatim(self, ctx: '_ExchangeContext'):
             upstream_path = ctx.modified_headers.get(':path', self.path)
-            forwarded = strip_pseudo_and_hop(ctx.raw_headers)
+            forwarded = strip_pseudo_and_hop(ctx.modified_headers)
             forwarded['Host'] = ctx.target_host
 
             conv_logger.log_request(
@@ -277,7 +282,7 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
                 ctx.inbound, ctx.outbound, ctx.operation,
             )
             forwarded = build_translated_headers(
-                ctx.raw_headers, ctx.outbound.name, ctx.target_host, len(out_bytes)
+                ctx.modified_headers, ctx.outbound.name, ctx.target_host, len(out_bytes)
             )
 
             conv_logger.log_request(
@@ -305,18 +310,21 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
                 ctx.modified_headers.get(':path', self.path),
                 ctx.inbound, ctx.outbound, ctx.operation,
             )
-            forwarded = strip_pseudo_and_hop(ctx.raw_headers)
+            forwarded = strip_pseudo_and_hop(ctx.modified_headers)
             for h in ('x-api-key', 'authorization', 'anthropic-version',
                       'anthropic-beta', 'content-type', 'content-length'):
                 forwarded = {k: v for k, v in forwarded.items() if k.lower() != h}
-            credential = extract_credential(ctx.raw_headers)
+            credential = extract_credential(ctx.modified_headers)
             if credential:
                 if ctx.outbound.name == 'anthropic':
                     forwarded['x-api-key'] = credential
                     forwarded.setdefault('anthropic-version', '2023-06-01')
+                    logger.debug(f"[HEADER ADD] x-api-key: {credential!r}")
                 else:
                     forwarded['Authorization'] = f'Bearer {credential}'
+                    logger.debug(f"[HEADER ADD] Authorization: Bearer {credential!r}")
             forwarded['Host'] = ctx.target_host
+            logger.debug(f"[HEADER SET] Host: {ctx.target_host!r}")
 
             conv_logger.log_request(
                 ctx.request_time, ctx.rule_id,

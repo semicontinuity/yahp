@@ -9,6 +9,7 @@
 - Translates `/v1/models` endpoint between protocol formats
 - Configurable routing based on HTTP headers and path prefixes: routing using the first matched rule
 - Model override via `then.model` in the rule
+- Add/override headers via `then.headers` in the rule
 - Unknown request fields forwarded best-effort with a logged warning
 - Structurally malformed input rejected (400) without forwarding
 - Unrecognized endpoints passed through verbatim
@@ -70,6 +71,28 @@ rules:
       path_prefix: /
 logs-path: /home/user/.local/state/yahp/logs
 ```
+
+### Adding or overriding headers
+
+Use `then.headers` to inject custom headers or override existing ones:
+
+```yaml
+rules:
+  - name: with-custom-headers
+    when:
+      path_prefix: /v1/
+      protocol: openai
+    then:
+      host: api.openai.com
+      path_prefix: /
+      headers:
+        - name: "X-Custom-Header"
+          value: "my-value"
+        - name: "anthropic-version"
+          value: "2024-01-01"
+```
+
+Headers are applied in order. Note that auth-related headers (`x-api-key`, `authorization`, `anthropic-version`, `anthropic-beta`, `content-type`) may be rewritten during cross-protocol translation.
 
 ## Log Files
 

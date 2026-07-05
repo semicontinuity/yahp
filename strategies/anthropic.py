@@ -212,7 +212,8 @@ class AnthropicStrategy(Strategy):
         """Emit Anthropic SSE bytes from canonical stream events."""
         block_index = -1
         block_type = None
-        output_tokens = 0
+        usage = CanonicalUsage()
+        done = None
         tool_index_map: dict[int, int] = {}
 
         for event in events:
@@ -273,18 +274,30 @@ class AnthropicStrategy(Strategy):
                 })
 
             elif isinstance(event, UsageDelta):
-                output_tokens = event.usage.output_tokens
+                usage = event.usage
 
             elif isinstance(event, StreamDone):
                 if block_type is not None:
                     yield _sse_bytes('content_block_stop',
                                      {'type': 'content_block_stop', 'index': block_index})
-                yield _sse_bytes('message_delta', {
-                    'type': 'message_delta',
-                    'delta': {'stop_reason': event.stop_reason, 'stop_sequence': event.stop_sequence},
-                    'usage': {'output_tokens': output_tokens},
-                })
-                yield _sse_bytes('message_stop', {'type': 'message_stop'})
+                    block_type = None
+                done = event
+
+        # Emit final usage after the stream ends: OpenAI sends its usage chunk
+        # *after* the finish_reason chunk, so the UsageDelta can arrive later
+        # than StreamDone.
+        if done is not None:
+            yield _sse_bytes('message_delta', {
+                'type': 'message_delta',
+                'delta': {'stop_reason': done.stop_reason, 'stop_sequence': done.stop_sequence},
+                'usage': {
+                    'input_tokens': usage.input_tokens,
+                    'cache_creation_input_tokens': usage.cache_creation_input_tokens,
+                    'cache_read_input_tokens': usage.cache_read_input_tokens,
+                    'output_tokens': usage.output_tokens,
+                },
+            })
+            yield _sse_bytes('message_stop', {'type': 'message_stop'})
 
     # --- model listing (Slice 5) -----------------------------------------
 

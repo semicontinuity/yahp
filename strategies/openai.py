@@ -29,6 +29,23 @@ def _join_text(blocks) -> str:
     return ''.join(b.text for b in blocks if isinstance(b, TextBlock))
 
 
+def _usage_from_openai(usage: dict) -> CanonicalUsage:
+    """Map OpenAI usage to canonical, splitting cached prompt tokens out of input.
+
+    OpenAI's prompt_tokens is the total prompt; prompt_tokens_details.cached_tokens
+    is a subset (cache reads). Anthropic reports uncached input separately, so we
+    subtract cached from input_tokens to avoid double-counting. OpenAI has no
+    cache-creation concept, so cache_creation_input_tokens is always 0.
+    """
+    prompt = usage.get('prompt_tokens', 0)
+    cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0)
+    return CanonicalUsage(
+        input_tokens=prompt - cached,
+        output_tokens=usage.get('completion_tokens', 0),
+        cache_read_input_tokens=cached,
+    )
+
+
 def _parse_oai_tool_choice(tc):
     if tc is None:
         return None
@@ -255,10 +272,7 @@ class OpenAIStrategy(Strategy):
 
         if not choices:
             if usage:
-                yield UsageDelta(CanonicalUsage(
-                    input_tokens=usage.get('prompt_tokens', 0),
-                    output_tokens=usage.get('completion_tokens', 0),
-                ))
+                yield UsageDelta(_usage_from_openai(usage))
             return
 
         choice = choices[0]
@@ -288,10 +302,7 @@ class OpenAIStrategy(Strategy):
                 yield ToolCallDelta(index=oai_idx, partial_json=args)
 
         if usage:
-            yield UsageDelta(CanonicalUsage(
-                input_tokens=usage.get('prompt_tokens', 0),
-                output_tokens=usage.get('completion_tokens', 0),
-            ))
+            yield UsageDelta(_usage_from_openai(usage))
 
         if finish_reason is not None:
             yield StreamDone(stop_reason=FINISH_TO_CANONICAL.get(finish_reason, finish_reason))
