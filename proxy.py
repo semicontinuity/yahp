@@ -171,6 +171,7 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
             rule_name = matched_rule.get('name', '')
             logger.info(f"Matched rule: {rule_name} "
                         f"[{inbound_name}->{outbound_name}] op={operation}")
+            self._log_model_for_routing(inbound_model, matched_rule, rule_name)
 
             ctx = _ExchangeContext(
                 request_time=request_time, rule_id=rule_id,
@@ -196,6 +197,15 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
                 return model
             except (json.JSONDecodeError, AttributeError):
                 return None
+
+        def _log_model_for_routing(self, model: str | None, matched_rule: dict, rule_name: str) -> None:
+            """Log the model only when it actually drove the routing decision.
+
+            A rule's `when.model` makes the model a matching condition; that is the
+            only case where the model participated in choosing this rule.
+            """
+            if model and matched_rule.get('when', {}).get('model'):
+                logger.info(f"[ROUTING] model={model} matched rule={rule_name}")
 
         # --- verbatim same-protocol fast-path -------------------------
 
