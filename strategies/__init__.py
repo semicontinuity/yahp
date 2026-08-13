@@ -41,12 +41,17 @@ def validate_rules(rules: list[dict]) -> None:
     Raises ConfigError on the first violation:
       - a rule missing when.protocol;
       - a when/then protocol with no registered strategy;
-      - a rule name that is empty or contains invalid characters.
+      - a rule name that is empty or contains invalid characters;
+      - a rule with invalid enabled type.
     """
     available = ', '.join(available_protocols())
     for rule in rules:
         name = rule.get('name', '<unnamed>')
         inbound, outbound = resolve_protocols(rule)
+
+        # Validate enabled field type
+        if 'enabled' in rule and not isinstance(rule['enabled'], bool):
+            raise ConfigError(f"Rule '{name}' has invalid 'enabled' value: must be boolean")
 
         if not inbound:
             raise ConfigError(f"Rule '{name}' is missing required when.protocol")

@@ -45,6 +45,7 @@ class RuleThen(TypedDict, total=False):
 
 class Rule(TypedDict, total=False):
     name: str
+    enabled: bool        # if false, rule is skipped (defaults to true if omitted)
     when: RuleCondition
     then: RuleThen
 
@@ -93,6 +94,10 @@ class FakeResponse:
 
 def match_rule(config: Config, headers: dict[str, str], model: str | None = None) -> tuple[Rule | None, str | None, str | None, dict[str, str]]:
     for rule in config.rules:
+        # Skip explicitly disabled rules
+        if rule.get('enabled', True) is False:
+            continue
+
         when = rule.get('when', {})
         then = rule.get('then', {})
 

@@ -41,6 +41,21 @@ pip install pyyaml requests
 
 Configuration is a YAML file. Each rule must declare `when.protocol`; `then.protocol` defaults to `when.protocol`.
 
+### Disabling rules
+
+Set `enabled: false` to temporarily disable a rule without removing it:
+
+```yaml
+rules:
+  - name: disabled-rule
+    enabled: false  # this rule will be skipped
+    when:
+      path_prefix: /v1/
+      protocol: openai
+    then:
+      host: api.openai.com
+```
+
 ### Example: Anthropic → OpenAI translation for specific model
 
 ```yaml
