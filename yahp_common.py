@@ -128,12 +128,18 @@ def match_rule(config: Config, headers: dict[str, str], model: str | None = None
             name = header_set.get('name')
             value = header_set.get('value')
             if name and value is not None:
-                old_val = modified_headers.get(name)
-                if old_val is not None:
-                    logger.debug(f"[HEADER OVERRIDE] {name}: {old_val!r} -> {value!r}")
+                if value == '':
+                    # Empty string means remove the header
+                    if name in modified_headers:
+                        logger.debug(f"[-] {name}: {modified_headers[name]!r}")
+                        del modified_headers[name]
                 else:
-                    logger.debug(f"[HEADER ADD] {name}: {value!r}")
-                modified_headers[name] = value
+                    old_val = modified_headers.get(name)
+                    if old_val is not None:
+                        logger.debug(f"[HEADER OVERRIDE] {name}: {old_val!r} -> {value!r}")
+                    else:
+                        logger.debug(f"[HEADER ADD] {name}: {value!r}")
+                    modified_headers[name] = value
 
         return rule, target_host, target_scheme, modified_headers
 

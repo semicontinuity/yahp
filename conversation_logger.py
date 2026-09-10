@@ -40,16 +40,51 @@ class ConversationLogger:
         ts = timestamp.replace(':', '').replace('+', 'Z+').replace('-', '')
         file_suffix = f"-{agent_id}" if agent_id else ""
 
+        # Build comparison for outbound headers
+        inbound_non_pseudo = {k: v for k, v in raw_headers.items() if not k.startswith(':')}
+        outbound_keys = set(forwarded_headers.keys())
+        inbound_keys = set(inbound_non_pseudo.keys())
+
         header_file = os.path.join(logs_path, f"{ts}{file_suffix}.req.h.txt")
         with open(header_file, 'w') as f:
-            f.write(f"{original_headers[':method']} {path} HTTP/1.1\n")
+            f.write(f"=== INBOUND HEADERS ===\n")
+            f.write(f"{raw_headers.get(':method', 'UNKNOWN')} {path} HTTP/1.1\n")
+            for key, value in raw_headers.items():
+                if not key.startswith(':'):
+                    f.write(f"  {key}: {value}\n")
+            f.write(f"\n=== OUTBOUND HEADERS ===\n")
             for key, value in forwarded_headers.items():
-                f.write(f"{key}: {value}\n")
+                if key not in inbound_keys:
+                    indicator = '[+]'
+                elif forwarded_headers[key] != inbound_non_pseudo[key]:
+                    indicator = '[X]'
+                else:
+                    indicator = '   '
+                f.write(f"{indicator} {key}: {value}\n")
+
+        # Build lookup of changed headers (inbound keys that differ in outbound)
+        changed_inbound_keys = {
+            k for k in inbound_non_pseudo.keys()
+            if k in forwarded_headers and forwarded_headers[k] != inbound_non_pseudo[k]
+        }
 
         logger.info(f"> {original_headers[':method']} {path}")
-        if logger.isEnabledFor(logging.DEBUG):
-            for key, value in forwarded_headers.items():
-                logger.debug(f">   {key}: {value}")
+        logger.info("=== INBOUND HEADERS ===")
+        for key, value in raw_headers.items():
+            if not key.startswith(':'):
+                if key in changed_inbound_keys:
+                    logger.info(f"[X] {key}: {value}")
+                else:
+                    logger.info(f"    {key}: {value}")
+        logger.info("=== OUTBOUND HEADERS ===")
+        for key, value in forwarded_headers.items():
+            if key not in inbound_keys:
+                indicator = '[+]'
+            elif key in changed_inbound_keys:
+                indicator = '[X]'
+            else:
+                indicator = '   '
+            logger.info(f"{indicator} {key}: {value}")
 
         if body:
             content_type = original_headers.get('content-type', original_headers.get('Content-Type', '')).lower()
@@ -74,6 +109,12 @@ class ConversationLogger:
             f.write(f"HTTP/1.1 {response.status_code}\n")
             for key, value in response.headers.items():
                 f.write(f"{key}: {value}\n")
+
+        logger.info(f"< HTTP/1.1 {response.status_code}")
+        logger.info("=== RESPONSE HEADERS ===")
+        for key, value in response.headers.items():
+            logger.info(f"  {key}: {value}")
+        print()
 
         if response.content:
             content_type = response.headers.get('Content-Type', '').lower()

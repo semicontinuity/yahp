@@ -64,23 +64,42 @@ def extract_credential(headers: dict[str, str]) -> str | None:
 def build_translated_headers(raw_headers: dict[str, str], outbound_name: str,
                              target_host: str, body_len: int) -> dict[str, str]:
     """Build forwarded headers, normalizing auth to the outbound protocol's style."""
+    # Check if auth headers were explicitly set (e.g., by rule config) BEFORE stripping
+    saved_x_api_key = raw_headers.get('x-api-key')
+    saved_authorization = raw_headers.get('Authorization')
+    saved_anthropic_version = raw_headers.get('anthropic-version')
+
     forwarded = {
         k: v for k, v in strip_pseudo_and_hop(raw_headers).items()
         if k.lower() not in ('x-api-key', 'authorization', 'anthropic-version',
                              'anthropic-beta', 'content-type')
     }
-    credential = extract_credential(raw_headers)
-    if credential:
-        if outbound_name == 'anthropic':
-            forwarded['x-api-key'] = credential
-            forwarded.setdefault('anthropic-version',
-                                 raw_headers.get('anthropic-version', '2023-06-01'))
-            logger.debug(f"[HEADER ADD] x-api-key: {credential!r}")
-            if 'anthropic-version' in forwarded:
-                logger.debug(f"[HEADER ADD] anthropic-version: {forwarded['anthropic-version']!r}")
-        else:
-            forwarded['Authorization'] = f'Bearer {credential}'
-            logger.debug(f"[HEADER ADD] Authorization: Bearer {credential!r}")
+
+    # Restore explicitly set auth headers from rule config
+    if saved_x_api_key is not None:
+        forwarded['x-api-key'] = saved_x_api_key
+        logger.debug(f"[HEADER SET] x-api-key: {saved_x_api_key!r}")
+    if saved_authorization is not None:
+        forwarded['Authorization'] = saved_authorization
+        logger.debug(f"[HEADER SET] Authorization: {saved_authorization!r}")
+    if saved_anthropic_version is not None:
+        forwarded['anthropic-version'] = saved_anthropic_version
+        logger.debug(f"[HEADER SET] anthropic-version: {saved_anthropic_version!r}")
+
+    # If no explicit auth headers were set, derive from the original request
+    if saved_x_api_key is None and saved_authorization is None:
+        credential = extract_credential(raw_headers)
+        if credential:
+            if outbound_name == 'anthropic':
+                forwarded['x-api-key'] = credential
+                logger.debug(f"[HEADER ADD] x-api-key: {credential!r}")
+                forwarded.setdefault('anthropic-version',
+                                     raw_headers.get('anthropic-version', '2023-06-01'))
+                if 'anthropic-version' in forwarded:
+                    logger.debug(f"[HEADER ADD] anthropic-version: {forwarded['anthropic-version']!r}")
+            else:
+                forwarded['Authorization'] = f'Bearer {credential}'
+                logger.debug(f"[HEADER ADD] Authorization: Bearer {credential!r}")
     forwarded['Host'] = target_host
     forwarded['Content-Type'] = 'application/json'
     forwarded['Content-Length'] = str(body_len)
@@ -152,6 +171,8 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
         # --- dispatch core --------------------------------------------
 
         def _dispatch(self, method: str):
+            host = self.headers.get('Host', 'unknown')
+            print(f"\n>>> {host}{self.path}")
             request_time = datetime.now().astimezone().isoformat()
             raw_headers = self._raw_headers(method)
             body_bytes = self._read_body() if method == 'POST' else b''
@@ -321,18 +342,34 @@ def create_request_handler(config: Config, conv_logger: ConversationLogger) -> t
                 ctx.inbound, ctx.outbound, ctx.operation,
             )
             forwarded = strip_pseudo_and_hop(ctx.modified_headers)
+
+            # Preserve explicitly set auth headers (from rule config)
+            saved_x_api_key = forwarded.get('x-api-key')
+            saved_authorization = forwarded.get('Authorization')
+            saved_anthropic_version = forwarded.get('anthropic-version')
+
             for h in ('x-api-key', 'authorization', 'anthropic-version',
                       'anthropic-beta', 'content-type', 'content-length'):
                 forwarded = {k: v for k, v in forwarded.items() if k.lower() != h}
+
             credential = extract_credential(ctx.modified_headers)
             if credential:
                 if ctx.outbound.name == 'anthropic':
-                    forwarded['x-api-key'] = credential
-                    forwarded.setdefault('anthropic-version', '2023-06-01')
-                    logger.debug(f"[HEADER ADD] x-api-key: {credential!r}")
+                    if saved_x_api_key is not None:
+                        forwarded['x-api-key'] = saved_x_api_key
+                    else:
+                        forwarded['x-api-key'] = credential
+                    if saved_anthropic_version is not None:
+                        forwarded['anthropic-version'] = saved_anthropic_version
+                    else:
+                        forwarded.setdefault('anthropic-version', '2023-06-01')
+                    logger.debug(f"[HEADER ADD] x-api-key: {forwarded['x-api-key']!r}")
                 else:
-                    forwarded['Authorization'] = f'Bearer {credential}'
-                    logger.debug(f"[HEADER ADD] Authorization: Bearer {credential!r}")
+                    if saved_authorization is not None:
+                        forwarded['Authorization'] = saved_authorization
+                    else:
+                        forwarded['Authorization'] = f'Bearer {credential}'
+                    logger.debug(f"[HEADER ADD] Authorization: {forwarded['Authorization']!r}")
             forwarded['Host'] = ctx.target_host
             logger.debug(f"[HEADER SET] Host: {ctx.target_host!r}")
 
